@@ -484,6 +484,119 @@
     lastPhaseKey = phaseKey;
   }
 
+  // ---- 購入履歴から取り込む ----
+  // ストアの購入履歴ページや注文確認メールを貼り付けてもらい、書かれた商品名から購入済みの候補を探す。
+  // 文章はこのページの中で照合するだけで、保存も送信もしない。同じ商品が何度出てきても1回として数え、
+  // すでに購入済みの商品は変えないので、同じ文章を何度貼っても記録は壊れない。
+
+  const historyStatus = $('#historyStatus');
+  const historyResult = $('#historyResult');
+  const historyList = $('#historyList');
+  let historyMatches = [];
+  let historyIndex = null;
+  const normText = text => text.normalize('NFKC').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').toLowerCase();
+  const coreTitle = title => normText(title.replace(/^(【[^】]*】\s*)+/, '').replace(/\s*[-－–‐]\s*(?:[A-Z]|EN)グループ$/, '')).trim();
+  function historyTell(text, isError) {
+    historyStatus.textContent = text;
+    historyStatus.classList.toggle('is-error', !!isError);
+  }
+  // 商品名 → 同じ名前の商品。長い名前から照合し、「EX 〇〇」の中の「〇〇」を二重に拾わないようにする。
+  function buildHistoryIndex() {
+    const byName = new Map();
+    for (const g of groups) {
+      for (const item of g.items) {
+        const key = normText(item.name).trim();
+        if (key.length < 4) continue;
+        if (!byName.has(key)) byName.set(key, []);
+        byName.get(key).push(item);
+      }
+    }
+    return [...byName.entries()].sort((a, b) => b[0].length - a[0].length);
+  }
+  function matchHistory(text) {
+    historyIndex = historyIndex || buildHistoryIndex();
+    const src = normText(text);
+    const used = new Uint8Array(src.length);
+    const found = new Map();
+    for (const [key, items] of historyIndex) {
+      for (let pos = src.indexOf(key); pos !== -1; pos = src.indexOf(key, pos + 1)) {
+        if (used.subarray(pos, pos + key.length).some(Boolean)) continue;
+        used.fill(1, pos, pos + key.length);
+        let pick = items;
+        if (items.length > 1) {
+          // 同じ名前の商品が複数あるとき（再販や「コンプリートセット」など）は、近くに企画名があるものに絞る。
+          const around = src.slice(Math.max(0, pos - 300), pos + key.length + 300);
+          const narrowed = items.filter(item => {
+            const title = coreTitle(item.group.title);
+            return title.length >= 2 && around.includes(title);
+          });
+          if (narrowed.length) pick = narrowed;
+          else if (items.length > 3) continue; // 名前だけでは決めようがない
+        }
+        const ambiguous = pick.length > 1;
+        for (const item of pick) {
+          const seen = found.get(item.id);
+          if (!seen) found.set(item.id, { item, ambiguous });
+          else if (!ambiguous) seen.ambiguous = false;
+        }
+      }
+    }
+    const order = new Map(groups.map((g, i) => [g, i]));
+    return [...found.values()].sort((a, b) => order.get(a.item.group) - order.get(b.item.group) || a.item.name.localeCompare(b.item.name, 'ja'));
+  }
+  function renderHistory() {
+    const fresh = historyMatches.filter(m => !bought.has(m.item.id));
+    $('#historySummary').textContent = `見つかった商品 ${historyMatches.length}点（うち購入済み ${historyMatches.length - fresh.length}点）。`
+      + (fresh.length ? '購入済みにする商品にチェックを付けて確定してください。' : '新しく購入済みにする商品はありません。');
+    historyList.replaceChildren(...historyMatches.map(({ item, ambiguous }) => {
+      const li = make('li');
+      const label = make('label');
+      const done = bought.has(item.id);
+      const box = make('input');
+      box.type = 'checkbox';
+      box.value = item.id;
+      box.checked = !done && !ambiguous;
+      box.disabled = done;
+      const text = make('span', 'history-text');
+      text.append(make('b', '', item.name), make('small', '', `${item.group.title} · ${yen(item.price)}`));
+      if (done) text.append(make('small', 'history-note', '購入済み（変更なし）'));
+      else if (ambiguous) text.append(make('small', 'history-note', '同じ名前の商品がほかにもあるため、確かめてからチェックしてください'));
+      label.append(box, text);
+      li.append(label);
+      return li;
+    }));
+    $('#historyApply').hidden = fresh.length === 0;
+    historyResult.hidden = false;
+  }
+  $('#historyMatch').addEventListener('click', () => {
+    const text = $('#historyIn').value;
+    if (!text.trim()) { historyTell('購入履歴の文章を貼り付けてください。', true); return; }
+    historyMatches = matchHistory(text);
+    historyTell('');
+    if (!historyMatches.length) {
+      historyResult.hidden = true;
+      historyTell('商品名が見つかりませんでした。購入履歴ページの商品名が入るように、ページ全体をコピーしてください。', true);
+      return;
+    }
+    renderHistory();
+  });
+  $('#historyApply').addEventListener('click', () => {
+    const ids = [...historyList.querySelectorAll('input:checked:not(:disabled)')].map(box => box.value);
+    if (!ids.length) { historyTell('購入済みにする商品にチェックを付けてください。', true); return; }
+    const before = bought.size;
+    ids.forEach(id => bought.add(id));
+    save('v2', [...bought]);
+    alertKey = '';
+    refresh();
+    renderHistory();
+    historyTell(`${bought.size - before}点を購入済みにしました。`);
+  });
+  $('#historyCancel').addEventListener('click', () => {
+    historyResult.hidden = true;
+    historyMatches = [];
+    historyTell('');
+  });
+
   // ---- 記録の引き継ぎ ----
   // 書き出し形式（ファイル・コード共通）。項目を足すときは version を上げ、古い形式も読めるようにする。
   // コードは JSON を deflate で圧縮して base64url にし、先頭に形式を付ける（圧縮できないブラウザは NVP0）。
