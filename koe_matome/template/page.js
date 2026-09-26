@@ -55,8 +55,10 @@
 
   // ---- データの読み込み ----
 
+  // 英語表記（例：Shioriha Ruri）を小文字の語に分ける。ダウンロードしたファイル名との照合に使う。
+  const enParts = en => (en || '').normalize('NFKC').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   function parse(data) {
-    members = data.members.map(([key, name, branch, listed, selectable]) => ({ key, name, branch, listed: listed === 1, selectable: selectable === 1, count: 0 }));
+    members = data.members.map(([key, name, branch, listed, selectable, en]) => ({ key, name, branch, listed: listed === 1, selectable: selectable === 1, count: 0, enParts: enParts(en) }));
     memberByKey = new Map(members.map(m => [m.key, m]));
     groups = data.groups.map(([id, title, isLimited, start, end, onSale, , rows]) => {
       const g = {
@@ -485,21 +487,29 @@
   }
 
   // ---- 購入履歴から取り込む ----
-  // ストアの購入履歴ページや注文確認メールを貼り付けてもらい、書かれた商品名から購入済みの候補を探す。
-  // 文章はこのページの中で照合するだけで、保存も送信もしない。同じ商品が何度出てきても1回として数え、
-  // すでに購入済みの商品は変えないので、同じ文章を何度貼っても記録は壊れない。
+  // 購入履歴ページや注文確認メールの文章、ダウンロードしたボイスのファイルから、購入済みの候補を探す。
+  // 文章やファイルはこのページの中で読むだけで、保存も送信もしない。音声は再生も解析もせず、ファイル名と曲名タグだけ見る。
+  // 候補は確かめてから記録する。同じ商品が何度出てきても1回として数え、購入済みの商品は変えないので、何度入れても記録は壊れない。
 
   const historyStatus = $('#historyStatus');
   const historyResult = $('#historyResult');
   const historyList = $('#historyList');
-  let historyMatches = [];
-  let historyIndex = null;
+  let historyMatches = [];   // 商品名がそのまま書かれていたもの [{ item, ambiguous }]
+  let historyQuestions = []; // 名前の近い候補 [{ label, candidates: [{ item, score }], pick }]
+  let historyIndex = null, gramIndex = null, groupOrder = null;
   const normText = text => text.normalize('NFKC').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').toLowerCase();
   const coreTitle = title => normText(title.replace(/^(【[^】]*】\s*)+/, '').replace(/\s*[-－–‐]\s*(?:[A-Z]|EN)グループ$/, '')).trim();
+  const itemText = item => item.norm || (item.norm = normText(`${item.group.title} ${item.name}`));
+  const clip = (text, max) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
   function historyTell(text, isError) {
     historyStatus.textContent = text;
     historyStatus.classList.toggle('is-error', !!isError);
   }
+  function byGroupOrder(a, b) {
+    groupOrder = groupOrder || new Map(groups.map((g, i) => [g, i]));
+    return groupOrder.get(a.group) - groupOrder.get(b.group) || a.name.localeCompare(b.name, 'ja');
+  }
+
   // 商品名 → 同じ名前の商品。長い名前から照合し、「EX 〇〇」の中の「〇〇」を二重に拾わないようにする。
   function buildHistoryIndex() {
     const byName = new Map();
@@ -523,7 +533,15 @@
         if (used.subarray(pos, pos + key.length).some(Boolean)) continue;
         used.fill(1, pos, pos + key.length);
         let pick = items;
-        if (items.length > 1) {
+        // 短い商品名（「ありがとう」など）は普通の文にも出てくるので、近くに企画名があるときだけ数える。
+        if (key.length < 8) {
+          const around = src.slice(Math.max(0, pos - 300), pos + key.length + 300);
+          pick = items.filter(item => {
+            const title = coreTitle(item.group.title);
+            return title.length >= 2 && title !== key && around.includes(title);
+          });
+          if (!pick.length) continue;
+        } else if (items.length > 1) {
           // 同じ名前の商品が複数あるとき（再販や「コンプリートセット」など）は、近くに企画名があるものに絞る。
           const around = src.slice(Math.max(0, pos - 300), pos + key.length + 300);
           const narrowed = items.filter(item => {
@@ -536,53 +554,464 @@
         const ambiguous = pick.length > 1;
         for (const item of pick) {
           const seen = found.get(item.id);
-          if (!seen) found.set(item.id, { item, ambiguous });
+          if (!seen) found.set(item.id, { item, ambiguous, key });
           else if (!ambiguous) seen.ambiguous = false;
         }
       }
     }
-    const order = new Map(groups.map((g, i) => [g, i]));
-    return [...found.values()].sort((a, b) => order.get(a.item.group) - order.get(b.item.group) || a.item.name.localeCompare(b.item.name, 'ja'));
+    return [...found.values()];
+  }
+
+  // 名前が少し違う行（「【再販】」の有無、空白や記号の違い、商品名の省略など）は、2文字ずつの並びの重なりで近い商品を探す。
+  // どの商品にもよく出てくる並び（「ボイ」「イス」など）は手がかりにならないので数えない。
+  function grams(text) {
+    const s = normText(text).replace(/[\s【】「」『』()（）\[\]・,、。:：/／\-–—_~〜～]+/g, '');
+    const out = new Set();
+    for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+    return out;
+  }
+  function buildGramIndex() {
+    const items = groups.flatMap(g => g.items);
+    const index = new Map();
+    items.forEach((item, n) => {
+      for (const gram of grams(itemText(item))) {
+        let list = index.get(gram);
+        if (!list) index.set(gram, list = []);
+        list.push(n);
+      }
+    });
+    return { items, index, common: Math.max(50, items.length / 12) };
+  }
+  function similarItems(line, max) {
+    gramIndex = gramIndex || buildGramIndex();
+    const { items, index, common } = gramIndex;
+    const mine = [...grams(line)].filter(gram => !(index.get(gram)?.length > common));
+    if (mine.length < 4) return [];
+    const hits = new Map();
+    for (const gram of mine) for (const n of index.get(gram) || []) hits.set(n, (hits.get(n) || 0) + 1);
+    return [...hits]
+      .map(([n, count]) => ({ item: items[n], score: count / mine.length }))
+      .filter(c => c.score >= 0.6)
+      .sort((a, b) => b.score - a.score || byGroupOrder(a.item, b.item))
+      .slice(0, max);
+  }
+
+  // ダウンロードしたファイルの名前（shioriha-ruri-birthday2026.mp3 など）は英語とローマ字なので、
+  // ライバーの英語表記・年・下の対応表の言葉で照合する。商品名を英訳したデータは持たない。
+  const WORDS = [
+    { file: ['birthday', 'bday', 'tanjobi', 'tanjoubi'], item: ['誕生日', 'birthday'] },
+    { file: ['anniversary', 'anniv', 'aniv', 'shunen'], item: ['周年', 'anniversary'] },
+    { file: ['christmas', 'xmas'], item: ['クリスマス', 'christmas'] },
+    { file: ['valentine', 'valentines'], item: ['バレンタイン', 'valentine'] },
+    { file: ['whiteday'], item: ['ホワイトデー', 'white day'] },
+    { file: ['halloween'], item: ['ハロウィン', 'halloween'] },
+    { file: ['newyear', 'shogatsu', 'oshogatsu'], item: ['正月', '年末年始', '新年', 'new year'] },
+    { file: ['situation'], item: ['シチュエーション', 'situation'] },
+    { file: ['welcome'], item: ['welcome'] },
+    { file: ['debut'], item: ['デビュー', 'debut'] },
+    { file: ['graduation'], item: ['卒業', 'graduation'] },
+    { file: ['seasonal', 'season', 'kisetsu'], item: ['季節', 'season'] },
+    { file: ['spring', 'haru'], item: ['春', 'spring'] },
+    { file: ['summer', 'natsu'], item: ['夏', 'summer'] },
+    { file: ['autumn', 'fall', 'aki'], item: ['秋', 'autumn'] },
+    { file: ['winter', 'fuyu'], item: ['冬', 'winter'] },
+    { file: ['sleep', 'goodnight', 'oyasumi'], item: ['睡眠', 'おやすみ', 'sleep'] },
+    { file: ['wakeup', 'morning', 'ohayo', 'mezame'], item: ['お目覚め', 'おはよう', 'morning'] },
+    { file: ['goods'], item: ['グッズ', 'goods'] },
+    { file: ['resale', 'rerun', 'saihan'], item: ['再販'] },
+    { file: ['diet'], item: ['ダイエット', 'diet'] },
+    { file: ['family', 'kazoku'], item: ['家族', 'family'] },
+    { file: ['idol'], item: ['アイドル', 'idol'] },
+    { file: ['fairytale', 'douwa'], item: ['童話', 'fairy'] },
+    { file: ['parallel'], item: ['パラレル', 'parallel'] },
+    { file: ['encourage', 'cheer', 'hagemashi'], item: ['励まし', 'cheer'] },
+    { file: ['scold', 'oshikari'], item: ['お叱り', 'scold'] },
+    { file: ['pamper', 'amayakashi'], item: ['甘やかし', 'pamper'] },
+    { file: ['farewell', 'owakare'], item: ['お別れ', 'farewell'] },
+    { file: ['tipsy', 'horoyoi'], item: ['ほろ酔い', 'tipsy'] },
+    { file: ['kaiki', 'horror'], item: ['怪奇', 'horror'] },
+    { file: ['mini'], item: ['ミニ', 'mini'] },
+    // 版の違い。ファイル名にない版は一段下げ、通常版を上に出す。
+    { file: ['set', 'complete', 'fullset'], item: ['セット', 'set', 'コンプリート'], edition: true },
+    { file: ['ex'], item: ['ex'], edition: true },
+    { file: ['another'], item: ['another'], edition: true }
+  ];
+  const IGNORE_WORDS = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'zip', 'pdf', 'voice', 'voices', 'track', 'the', 'and', 'vol']);
+  // 英字の言葉は単語の区切りで照合する（「ex」が「next」に当たらないように）。
+  for (const w of WORDS) w.tests = w.item.map(form => /^[a-z ]+$/.test(form) ? new RegExp(`(^|[^a-z])${form}([^a-z]|$)`) : form);
+  function itemHas(item, word) {
+    const text = itemText(item);
+    return word.tests.some(test => typeof test === 'string' ? text.includes(test) : test.test(text));
+  }
+  function fileWords(text) {
+    const tokens = text.normalize('NFKC')
+      .replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([a-zA-Z])(\d)/g, '$1 $2').replace(/(\d)([a-zA-Z])/g, '$1 $2')
+      .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    return { tokens, set: new Set(tokens), compact: tokens.join('') };
+  }
+  function membersIn(query, words) {
+    const jp = normText(query).replace(/[\s・_\-]/g, '');
+    return members.filter(m => {
+      const name = normText(m.name).replace(/[\s・_\-]/g, '');
+      if (name.length >= 2 && jp.includes(name)) return true;
+      const parts = m.enParts;
+      if (!parts.length) return false;
+      if (parts.every(p => words.set.has(p))) return true;
+      const joined = parts.join(''), reversed = [...parts].reverse().join('');
+      return joined.length >= 6 && (words.compact.includes(joined) || words.compact.includes(reversed));
+    });
+  }
+  function nameCandidates(query) {
+    const words = fileWords(query);
+    const who = membersIn(query, words);
+    const jp = normText(query);
+    const found = WORDS.filter(w => w.file.some(f => words.set.has(f) || (f.length >= 6 && words.compact.includes(f)))
+      || w.item.some(form => form.length >= 2 && /[^\x00-\x7f]/.test(form) && jp.includes(form)));
+    const years = words.tokens.filter(t => /^20\d\d$/.test(t));
+    const known = new Set([...members.flatMap(m => m.enParts), ...WORDS.flatMap(w => w.file)]);
+    const extra = words.tokens.filter(t => t.length >= 3 && !/^\d+$/.test(t) && !known.has(t) && !IGNORE_WORDS.has(t));
+    if (!who.length && !found.length && !extra.length) return [];
+    // ライバーが分からないときは、「ライバーを選ぶ」で選んでいる人の商品から探す。
+    const keys = new Set(who.length ? who.map(m => m.key) : picked);
+    const out = [];
+    for (const g of groups) {
+      for (const item of g.items) {
+        if (keys.size && !item.livers.some(key => keys.has(key))) continue;
+        const text = itemText(item);
+        let score = who.length ? 2 : 0;
+        for (const w of found) if (!w.edition && itemHas(item, w)) score += 2;
+        for (const w of WORDS) if (w.edition && itemHas(item, w)) score += found.includes(w) ? 2 : -1;
+        const itemYears = text.match(/20\d\d/g);
+        if (years.length && itemYears) score += years.some(y => itemYears.includes(y)) ? 3 : -3;
+        for (const t of extra) if (text.includes(t)) score += 1;
+        if (score >= 4) out.push({ item, score });
+      }
+    }
+    return out.sort((a, b) => b.score - a.score || byGroupOrder(a.item, b.item)).slice(0, 5);
+  }
+
+  // 1つのファイル（またはフォルダ）について、商品名の一致・文字の近さ・ファイル名の言葉をまとめて順位をつける。
+  function fileQuestion(label, query) {
+    const scores = new Map();
+    const add = (item, score) => { if (!(scores.get(item) >= score)) scores.set(item, score); };
+    for (const { item, ambiguous } of matchHistory(query)) add(item, ambiguous ? 12 : 20);
+    if (/[^\x00-\x7f]{3}/.test(query)) for (const { item, score } of similarItems(query, 5)) add(item, 10 * score);
+    for (const { item, score } of nameCandidates(query)) add(item, score);
+    const candidates = [...scores].map(([item, score]) => ({ item, score }))
+      .sort((a, b) => b.score - a.score || byGroupOrder(a.item, b.item)).slice(0, 5);
+    return candidates.length ? { label, candidates, pick: clearWinner(candidates, 6, 2) } : null;
+  }
+  // 1位がはっきり上のときだけ、最初から選んでおく。
+  function clearWinner(candidates, least, margin) {
+    const [top, next] = candidates;
+    if (!top || top.score < least || (next && top.score - next.score < margin) || bought.has(top.item.id)) return null;
+    return top.item.id;
+  }
+
+  // 貼り付けた文章・メール・保存したページ。商品名がそのまま書かれていればそれを、なければ行ごとに近い商品を出す。
+  function textResults(text) {
+    const exact = matchHistory(text);
+    const keys = exact.map(m => m.key);
+    const questions = [];
+    const seenLines = new Set();
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(/\s+/g, ' ').trim();
+      const norm = normText(line);
+      if (norm.length < 6 || norm.length > 160 || seenLines.has(norm) || keys.some(key => norm.includes(key))) continue;
+      seenLines.add(norm);
+      const candidates = similarItems(line, 4).map(c => ({ item: c.item, score: 10 * c.score }));
+      if (candidates.length) questions.push({ label: clip(line, 70), candidates, pick: clearWinner(candidates, 9, 1.5) });
+      if (questions.length >= 40) break;
+    }
+    return { exact, questions };
+  }
+
+  // ---- ファイルの読み取り（ページの中だけで行う） ----
+  const TEXT_FILE = /\.(txt|text|eml|html?|csv|tsv|md)$/i;
+  const AUDIO_FILE = /\.(mp3|wav|flac|m4a|aac|ogg|opus)$/i;
+  const MAX_FILES = 500;
+  const bytesToText = (bytes, charset) => {
+    try { return new TextDecoder(charset || 'utf-8').decode(bytes); }
+    catch { return new TextDecoder().decode(bytes); }
+  };
+  function htmlText(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script,style,noscript,template').forEach(el => el.remove());
+    doc.querySelectorAll('br,p,div,li,tr,td,th,h1,h2,h3,h4,h5,h6,dt,dd,section,article,table').forEach(el => el.append('\n'));
+    return doc.body ? doc.body.textContent : '';
+  }
+  // 注文確認メール（.eml）。MIME の各パートを文字コードと転送形式に合わせて文字に戻す。
+  function mailText(bytes) {
+    let raw = '';
+    for (let i = 0; i < bytes.length; i += 8192) raw += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    const toBytes = str => Uint8Array.from(str, ch => ch.charCodeAt(0) & 255);
+    const base64 = str => {
+      const clean = str.replace(/[^A-Za-z0-9+/]/g, '');
+      try { return toBytes(atob(clean + '==='.slice((clean.length + 3) % 4))); } catch { return new Uint8Array(); }
+    };
+    const qp = str => toBytes(str.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (m, h) => String.fromCharCode(parseInt(h, 16))));
+    const out = [];
+    raw.replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, (m, charset, enc, data) => {
+      out.push(bytesToText(enc.toLowerCase() === 'b' ? base64(data) : qp(data.replace(/_/g, ' ')), charset));
+      return m;
+    });
+    for (const part of raw.split(/\r?\n--[^\r\n]*/)) {
+      const m = part.match(/^([\s\S]*?)\r?\n\r?\n([\s\S]*)$/);
+      if (!m) continue;
+      const [, head, body] = m;
+      const type = (/content-type:\s*([^;\s]+)/i.exec(head) || [, 'text/plain'])[1].toLowerCase();
+      if (!type.startsWith('text/')) continue;
+      const charset = (/charset="?([^";\s]+)/i.exec(head) || [, 'utf-8'])[1];
+      const encoding = (/content-transfer-encoding:\s*([^\s;]+)/i.exec(head) || [, '7bit'])[1].toLowerCase();
+      const data = encoding === 'base64' ? base64(body) : encoding === 'quoted-printable' ? qp(body) : toBytes(body);
+      const text = bytesToText(data, charset);
+      out.push(type === 'text/html' ? htmlText(text) : text);
+    }
+    return out.join('\n');
+  }
+  // MP3 の曲名・アルバム名タグ（ID3v2）。ファイルの先頭だけ読む。
+  async function audioTags(file) {
+    if (!/\.mp3$/i.test(file.name)) return '';
+    const buf = new Uint8Array(await file.slice(0, 262144).arrayBuffer());
+    if (buf.length < 10 || buf[0] !== 0x49 || buf[1] !== 0x44 || buf[2] !== 0x33) return '';
+    const ver = buf[3];
+    const safe = p => ((buf[p] & 127) << 21) | ((buf[p + 1] & 127) << 14) | ((buf[p + 2] & 127) << 7) | (buf[p + 3] & 127);
+    const be32 = p => ((buf[p] << 24) | (buf[p + 1] << 16) | (buf[p + 2] << 8) | buf[p + 3]) >>> 0;
+    const end = Math.min(buf.length, 10 + safe(6));
+    let pos = 10;
+    if (buf[5] & 0x40) pos += ver === 4 ? safe(10) : be32(10) + 4;
+    const wanted = new Set(['TIT2', 'TALB', 'TT2', 'TAL']);
+    const found = [];
+    while (pos + 10 <= end) {
+      const small = ver === 2;
+      const id = String.fromCharCode(...buf.subarray(pos, pos + (small ? 3 : 4)));
+      const len = small ? (buf[pos + 3] << 16) | (buf[pos + 4] << 8) | buf[pos + 5] : ver === 4 ? safe(pos + 4) : be32(pos + 4);
+      const head = small ? 6 : 10;
+      if (!/^[A-Z0-9]{3,4}$/.test(id) || len <= 0) break;
+      if (wanted.has(id)) {
+        const body = buf.subarray(pos + head + 1, Math.min(end, pos + head + len));
+        const enc = buf[pos + head];
+        const charset = enc === 3 ? 'utf-8' : enc === 2 ? 'utf-16be' : enc === 1 ? (body[0] === 0xfe ? 'utf-16be' : 'utf-16le')
+          : body.some(b => b >= 0x80) ? 'shift_jis' : 'windows-1252';
+        found.push(bytesToText(body, charset).replace(/[\0\ufeff]/g, ' ').trim());
+      }
+      pos += head + len;
+    }
+    return found.join(' ');
+  }
+  // ZIP の中のフォルダ名とファイル名（中央ディレクトリだけ読み、展開はしない）。
+  async function zipNames(file) {
+    const tailSize = Math.min(file.size, 65557);
+    const tail = new DataView(await file.slice(file.size - tailSize).arrayBuffer());
+    let eocd = -1;
+    for (let i = tail.byteLength - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) return [];
+    const count = tail.getUint16(eocd + 10, true), size = tail.getUint32(eocd + 12, true), offset = tail.getUint32(eocd + 16, true);
+    if (size > 4e6 || offset + size > file.size) return [];
+    const cd = new Uint8Array(await file.slice(offset, offset + size).arrayBuffer());
+    const view = new DataView(cd.buffer);
+    const names = [];
+    for (let p = 0, n = 0; n < count && p + 46 <= cd.length && view.getUint32(p, true) === 0x02014b50; n++) {
+      const utf8 = view.getUint16(p + 8, true) & 0x800, nameLen = view.getUint16(p + 28, true);
+      const raw = cd.subarray(p + 46, p + 46 + nameLen);
+      let name;
+      try { name = new TextDecoder('utf-8', { fatal: !utf8 }).decode(raw); } catch { name = bytesToText(raw, 'shift_jis'); }
+      if (!/(^|\/)(__MACOSX|\.)/.test(name)) names.push(name);
+      p += 46 + nameLen + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    }
+    const dirs = new Set(names.flatMap(name => name.split('/').slice(0, -1)));
+    const files = names.filter(name => !name.endsWith('/')).slice(0, 3).map(name => name.split('/').pop().replace(/\.[^.]+$/, ''));
+    return [...[...dirs].slice(0, 5), ...files];
+  }
+  // ドロップされたもの。フォルダは中まで見る（深さ4・500ファイルまで）。
+  async function droppedFiles(transfer) {
+    const entries = [...(transfer.items || [])].map(item => item.webkitGetAsEntry && item.webkitGetAsEntry()).filter(Boolean);
+    if (!entries.length) return [...transfer.files].map(file => ({ file, path: file.name }));
+    const out = [];
+    async function walk(entry, depth) {
+      if (out.length >= MAX_FILES || entry.name.startsWith('.') || entry.name === '__MACOSX') return;
+      if (entry.isFile) {
+        out.push({ file: await new Promise((ok, ng) => entry.file(ok, ng)), path: entry.fullPath.replace(/^\//, '') });
+      } else if (entry.isDirectory && depth < 4) {
+        const reader = entry.createReader();
+        for (let batch; (batch = await new Promise((ok, ng) => reader.readEntries(ok, ng))).length;) {
+          for (const child of batch) await walk(child, depth + 1);
+        }
+      }
+    }
+    for (const entry of entries) await walk(entry, 0);
+    return out;
+  }
+  async function analyzeFiles(list) {
+    const exact = new Map();
+    const questions = [];
+    const addText = text => {
+      const result = textResults(text);
+      result.exact.forEach(m => { if (!exact.has(m.item.id) || !m.ambiguous) exact.set(m.item.id, m); });
+      questions.push(...result.questions);
+    };
+    // 同じフォルダに入った音声は1つの商品とみなし、フォルダ名とアルバム名でまとめて照合する。
+    const folders = new Map();
+    for (const { file, path } of list) {
+      if (TEXT_FILE.test(file.name)) {
+        if (file.size > 5e6) continue;
+        if (/\.eml$/i.test(file.name)) addText(mailText(new Uint8Array(await file.arrayBuffer())));
+        else if (/\.html?$/i.test(file.name)) addText(htmlText(await file.text()));
+        else addText(await file.text());
+        continue;
+      }
+      const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      if (dir && AUDIO_FILE.test(file.name)) {
+        if (!folders.has(dir)) folders.set(dir, []);
+        folders.get(dir).push(file);
+        continue;
+      }
+      let query = path.replace(/\.[^./]+$/, '');
+      if (/\.zip$/i.test(file.name)) query += ` ${(await zipNames(file)).join(' ')}`;
+      else query += ` ${await audioTags(file)}`;
+      const q = fileQuestion(path, query);
+      if (q) questions.push(q);
+    }
+    for (const [dir, files] of folders) {
+      const query = files.length > 1 ? `${dir} ${await audioTags(files[0])}` : `${dir}/${files[0].name.replace(/\.[^.]+$/, '')} ${await audioTags(files[0])}`;
+      const q = fileQuestion(files.length > 1 ? `${dir}/（${files.length}ファイル）` : `${dir}/${files[0].name}`, query);
+      if (q) questions.push(q);
+    }
+    return { exact: [...exact.values()], questions };
+  }
+  // 候補が同じ質問はまとめる（同じ商品の別ファイルなど）。商品名が一致した商品は候補から外す。
+  function tidyQuestions(questions, exact) {
+    const exactIds = new Set(exact.map(m => m.item.id));
+    const merged = new Map();
+    for (const q of questions) {
+      // 1位が商品名の一致で見つかった商品なら、その質問はもう答えが出ている。
+      if (exactIds.has(q.candidates[0].item.id)) continue;
+      q.candidates = q.candidates.filter(c => !exactIds.has(c.item.id));
+      if (!q.candidates.length) continue;
+      const key = q.candidates.map(c => c.item.id).join('|');
+      const same = merged.get(key);
+      if (same) same.labels.push(q.label);
+      else merged.set(key, { ...q, labels: [q.label] });
+    }
+    return [...merged.values()].map(q => ({
+      ...q, label: q.labels.length > 1 ? `${clip(q.labels[0], 60)} ほか${q.labels.length - 1}件` : q.labels[0],
+      pick: q.pick && q.candidates.some(c => c.item.id === q.pick) ? q.pick : null
+    }));
+  }
+  function showResults({ exact, questions }, emptyText) {
+    historyMatches = exact.sort((a, b) => byGroupOrder(a.item, b.item));
+    historyQuestions = tidyQuestions(questions, exact);
+    if (!historyMatches.length && !historyQuestions.length) {
+      historyResult.hidden = true;
+      historyTell(emptyText, true);
+      return;
+    }
+    historyTell('');
+    renderHistory();
+  }
+
+  function historyLine(item, control, note) {
+    const label = make('label');
+    const text = make('span', 'history-text');
+    text.append(make('b', '', item.name), make('small', '', `${item.group.title} · ${yen(item.price)}`));
+    if (note) text.append(make('small', 'history-note', note));
+    label.append(control, text);
+    return label;
   }
   function renderHistory() {
-    const fresh = historyMatches.filter(m => !bought.has(m.item.id));
-    $('#historySummary').textContent = `見つかった商品 ${historyMatches.length}点（うち購入済み ${historyMatches.length - fresh.length}点）。`
-      + (fresh.length ? '購入済みにする商品にチェックを付けて確定してください。' : '新しく購入済みにする商品はありません。');
-    historyList.replaceChildren(...historyMatches.map(({ item, ambiguous }) => {
+    const freshExact = historyMatches.filter(m => !bought.has(m.item.id));
+    const openQuestions = historyQuestions.filter(q => !q.candidates.some(c => bought.has(c.item.id)));
+    const parts = [];
+    if (historyMatches.length) parts.push(`商品名が一致 ${historyMatches.length}点（うち購入済み ${historyMatches.length - freshExact.length}点）`);
+    if (historyQuestions.length) parts.push(`名前の近い候補 ${historyQuestions.length}件`);
+    $('#historySummary').textContent = `${parts.join('、')}。`
+      + (freshExact.length || openQuestions.length ? '購入済みにする商品を選んで確定してください。' : '新しく購入済みにする商品はありません。');
+    const rows = historyMatches.map(({ item, ambiguous }) => {
       const li = make('li');
-      const label = make('label');
       const done = bought.has(item.id);
       const box = make('input');
       box.type = 'checkbox';
       box.value = item.id;
       box.checked = !done && !ambiguous;
       box.disabled = done;
-      const text = make('span', 'history-text');
-      text.append(make('b', '', item.name), make('small', '', `${item.group.title} · ${yen(item.price)}`));
-      if (done) text.append(make('small', 'history-note', '購入済み（変更なし）'));
-      else if (ambiguous) text.append(make('small', 'history-note', '同じ名前の商品がほかにもあるため、確かめてからチェックしてください'));
-      label.append(box, text);
-      li.append(label);
+      li.append(historyLine(item, box, done ? '購入済み（変更なし）' : ambiguous ? '同じ名前の商品がほかにもあるため、確かめてからチェックしてください' : ''));
       return li;
-    }));
-    $('#historyApply').hidden = fresh.length === 0;
+    });
+    historyQuestions.forEach((q, n) => {
+      const li = make('li', 'history-question');
+      const set = make('fieldset');
+      set.append(make('legend', '', `「${q.label}」に近い商品`));
+      const radio = (value, checked, disabled) => {
+        const input = make('input');
+        input.type = 'radio';
+        input.name = `historyQ${n}`;
+        input.value = value;
+        input.checked = checked;
+        input.disabled = disabled;
+        return input;
+      };
+      for (const { item } of q.candidates) {
+        const done = bought.has(item.id);
+        set.append(historyLine(item, radio(item.id, !done && q.pick === item.id, done), done ? '購入済み（変更なし）' : ''));
+      }
+      const none = make('label', 'history-none');
+      none.append(radio('', !q.pick || bought.has(q.pick), false), make('span', '', 'どれでもない'));
+      set.append(none);
+      li.append(set);
+      rows.push(li);
+    });
+    historyList.replaceChildren(...rows);
+    $('#historyApply').hidden = !freshExact.length && !openQuestions.length;
     historyResult.hidden = false;
   }
   $('#historyMatch').addEventListener('click', () => {
     const text = $('#historyIn').value;
     if (!text.trim()) { historyTell('購入履歴の文章を貼り付けてください。', true); return; }
-    historyMatches = matchHistory(text);
-    historyTell('');
-    if (!historyMatches.length) {
+    showResults(textResults(text), '商品名が見つかりませんでした。購入履歴ページの商品名が入るように、ページ全体をコピーしてください。');
+  });
+  async function takeFiles(list) {
+    if (!list.length) return;
+    historyTell(`${list.length}件のファイルを読んでいます…`);
+    try {
+      showResults(await analyzeFiles(list), 'ファイルから商品を見つけられませんでした。手動でチェックするか、購入履歴の文章を貼り付けてください。');
+    } catch {
       historyResult.hidden = true;
-      historyTell('商品名が見つかりませんでした。購入履歴ページの商品名が入るように、ページ全体をコピーしてください。', true);
-      return;
+      historyTell('ファイルを読めませんでした。', true);
     }
-    renderHistory();
+  }
+  $('#historyFiles').addEventListener('change', event => {
+    const list = [...event.target.files].slice(0, MAX_FILES).map(file => ({ file, path: file.webkitRelativePath || file.name }));
+    event.target.value = '';
+    takeFiles(list);
+  });
+  // ページのどこにファイルを落としても受け取る（文字のドラッグは今までどおり入力欄へ）。
+  const historySection = $('#historyTitle').closest('section');
+  const carriesFiles = event => [...(event.dataTransfer?.types || [])].includes('Files');
+  let dragDepth = 0;
+  document.addEventListener('dragenter', event => {
+    if (!carriesFiles(event) || $('#historyFiles').disabled) return;
+    dragDepth++;
+    historySection.classList.add('is-dropping');
+  });
+  document.addEventListener('dragleave', event => {
+    if (!carriesFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) historySection.classList.remove('is-dropping');
+  });
+  document.addEventListener('dragover', event => { if (carriesFiles(event)) event.preventDefault(); });
+  document.addEventListener('drop', event => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    historySection.classList.remove('is-dropping');
+    if ($('#historyFiles').disabled) return;
+    const reading = droppedFiles(event.dataTransfer);
+    historySection.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    reading.then(takeFiles, () => historyTell('ファイルを読めませんでした。', true));
   });
   $('#historyApply').addEventListener('click', () => {
-    const ids = [...historyList.querySelectorAll('input:checked:not(:disabled)')].map(box => box.value);
-    if (!ids.length) { historyTell('購入済みにする商品にチェックを付けてください。', true); return; }
+    const ids = new Set([...historyList.querySelectorAll('input:checked:not(:disabled)')].map(input => input.value).filter(Boolean));
+    if (!ids.size) { historyTell('購入済みにする商品を選んでください。', true); return; }
     const before = bought.size;
     ids.forEach(id => bought.add(id));
     save('v2', [...bought]);
@@ -594,6 +1023,7 @@
   $('#historyCancel').addEventListener('click', () => {
     historyResult.hidden = true;
     historyMatches = [];
+    historyQuestions = [];
     historyTell('');
   });
 

@@ -53,6 +53,39 @@ def normalize_name(name):
     return re.sub(r"[\s　・･.\-‐－_\u200b\ufeff]", "", unicodedata.normalize("NFKC", name)).lower()
 
 
+TALENTS = "https://www.nijisanji.jp/talents"
+
+
+def fetch_en_names():
+    """公式サイトのタレント一覧から [(ストアのライバーID か None, 名前, 英語表記)]。
+
+    ダウンロードしたボイスのファイル名（shioriha-ruri-birthday2026.mp3 のようなローマ字）を
+    ページで照合するために使う。取得は一覧ページ1回だけ。
+    """
+    page = fetch(TALENTS)
+    heads = list(re.finditer(r'"slug":"[^"]*","name":"((?:[^"\\]|\\.)*)","enName":"((?:[^"\\]|\\.)*)"', page))
+    found = []
+    for n, m in enumerate(heads):
+        rest = page[m.end():heads[n + 1].start() if n + 1 < len(heads) else len(page)]
+        shop = re.search(r'"officialShop":"https://shop\.nijisanji\.jp/(\d+)"', rest)
+        name, en = json.loads(f'"{m.group(1)}"'), json.loads(f'"{m.group(2)}"').strip()
+        if en:
+            found.append((shop.group(1) if shop else None, name, en))
+    return found
+
+
+def apply_en_names(members, found):
+    """members に英語表記（en）を入れ、変わった人数を返す。ストアのIDで合わせ、なければ名前で合わせる。"""
+    by_name = {normalize_name(m["name"]): i for i, m in members.items()}
+    changed = 0
+    for artist_id, name, en in found:
+        i = artist_id if artist_id in members else by_name.get(normalize_name(name))
+        if i and members[i].get("en") != en:
+            members[i]["en"] = en
+            changed += 1
+    return changed
+
+
 # ---- 商品一覧 ----
 
 def fetch_sitemap():

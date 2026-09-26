@@ -52,6 +52,13 @@ class Catalog:
                 m["listed"] = False
                 m.pop("order", None)
                 changes["一覧から消えた"].append(m["name"])
+        # 英語表記はダウンロードしたファイル名（ローマ字）との照合に使う補助情報。取れなくても続ける。
+        if hasattr(self.site, "fetch_en_names"):
+            try:
+                changed = self.site.apply_en_names(self.members, self.site.fetch_en_names())
+                changes["英語表記を更新"] = [f"{changed}人"] if changed else []
+            except Exception as e:
+                changes["英語表記を取得できなかった"] = [str(getattr(e, "code", type(e).__name__))]
         return changes
 
     def resolve(self, words):

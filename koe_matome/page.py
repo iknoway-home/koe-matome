@@ -26,7 +26,7 @@ def build_data(catalog):
                                   members[i].get("order", 0), members[i]["name"]))
     index = {artist_id: n for n, artist_id in enumerate(order)}
     member_rows = [[i, members[i]["name"], members[i]["branch"], int(bool(members[i].get("listed"))),
-                    int(not targets or i in targets)] for i in order]
+                    int(not targets or i in targets), members[i].get("en", "")] for i in order]
 
     by_group = {}
     for pid, p in voices["products"].items():

@@ -109,5 +109,29 @@ class VariantTest(unittest.TestCase):
         self.assertEqual(group_title("約束ボイス - ENグループ"), "約束ボイス")
 
 
+class EnNameTest(unittest.TestCase):
+    PAGE = ('{"slug":"ruri-shioriha","name":"栞葉るり","enName":"Shioriha Ruri","profile":{},'
+            '"socialLinks":{"officialShop":"https://shop.nijisanji.jp/1154"}},'
+            '{"slug":"old","name":"卒業 太郎","enName":"Taro Sotsugyo","socialLinks":{}}')
+
+    def test_reads_shop_id_and_english_name(self):
+        import koe_matome.sites.nijisanji as site
+        original = site.fetch
+        site.fetch = lambda url, *a, **k: self.PAGE
+        try:
+            found = site.fetch_en_names()
+        finally:
+            site.fetch = original
+        self.assertEqual(found, [("1154", "栞葉るり", "Shioriha Ruri"), (None, "卒業 太郎", "Taro Sotsugyo")])
+
+    def test_applies_by_id_then_by_name(self):
+        from koe_matome.sites.nijisanji import apply_en_names
+        members = {"1154": {"name": "栞葉るり"}, "g-卒業太郎": {"name": "卒業太郎"}}
+        changed = apply_en_names(members, [("1154", "栞葉るり", "Shioriha Ruri"), (None, "卒業 太郎", "Taro Sotsugyo")])
+        self.assertEqual(changed, 2)
+        self.assertEqual(members["g-卒業太郎"]["en"], "Taro Sotsugyo")
+        self.assertEqual(apply_en_names(members, [("1154", "栞葉るり", "Shioriha Ruri")]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
