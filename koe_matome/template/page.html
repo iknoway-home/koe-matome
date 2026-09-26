@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>ボイス購入リスト（{{SOURCE}}）｜koe-matome</title>
+<style>
+{{CSS}}
+</style>
+</head>
+<body>
+<header class="masthead editorial-header"><div class="masthead-inner"><div class="hero-grid"><div><h1>ボイス購入リスト<span class="subtitle">{{SOURCE}}の販売期間と購入記録</span></h1><p class="lede">選んだライバーのボイスを、販売期間と税込価格つきで一覧にし、商品ごとに購入を記録できる。</p></div><aside class="verdict" aria-label="使い方"><small>使い方</small><b>推しを選び、期限順に買う</b><span>購入は各行の公式販売ページで</span></aside></div></div></header>
+<main class="page">
+<p class="page-updated">データ取得 {{UPDATED}}</p>
+<p class="page-premise"><b>非公式のツールです。</b>{{DISCLAIMER}} 価格・販売期間はデータ取得時点のもので、購入前に必ず公式の販売ページを確認してください。販売終了・販売開始前の商品は購入記録用に残しているが、初期表示では「購入できる期間のみ」で隠している。</p><p id="storageNotice" class="storage-notice" role="status" hidden>ブラウザに保存できません。この画面では操作できますが、閉じると今回の変更が失われます。</p><noscript><p class="storage-notice">商品一覧の表示と購入記録にはJavaScriptが必要です。</p></noscript><p id="loadState" class="load-state" role="status">商品データを読み込んでいます…</p>
+<section id="deadlineAlert" class="deadline-alert" aria-label="販売終了が近い商品" hidden><div class="da-top" id="daTop">販売終了まで</div><ol class="da-list" id="daList"></ol></section>
+<section class="summary" aria-label="購入状況と金額"><div><strong id="visibleCount">0</strong><span>表示中の商品</span><small id="visibleYen">合計 0円</small></div><div><strong id="boughtCount">0</strong><span>購入済み</span><small id="boughtYen">0円</small></div><div><strong id="remainingCount">0</strong><span>未購入</span><small id="remainingYen">0円</small></div><div class="wish-tile"><strong id="wishCount">0</strong><span>ほしい（未購入）</span><small id="wishYen">0円</small></div></section>
+<section class="controls" aria-label="商品の絞り込み"><div class="pick-row"><button type="button" id="pickToggle" class="pick-toggle" aria-expanded="false" aria-controls="pickPanel" data-interactive disabled>ライバーを選ぶ</button><div class="filter-row" id="filters"></div></div><div id="pickPanel" class="pick-panel" hidden><div class="pick-tools"><input id="pickSearch" type="search" placeholder="名前で探す" aria-label="ライバーを名前で探す"><button type="button" id="pickClear">選択を解除</button><button type="button" id="pickClose">閉じる</button></div><div id="pickLists"></div></div><div class="search-row"><input id="search" type="search" placeholder="企画・商品名で検索" aria-label="企画・商品名で検索" data-interactive disabled></div><div class="option-row"><label><input id="hideBought" type="checkbox" data-interactive disabled>購入済みを隠す</label><label><input id="onSaleOnly" type="checkbox" checked data-interactive disabled>購入できる期間のみ</label><label><input id="limitedOnly" type="checkbox" data-interactive disabled>期間限定のみ</label><label><input id="wishOnly" type="checkbox" data-interactive disabled>ほしいだけ</label></div></section>
+<div class="result-line"><span id="resultText" aria-live="polite"></span><span>点数は購入できる商品数（音声ファイル数ではありません）</span></div>
+<div class="table-wrap"><table id="purchaseTable"><thead><tr><th scope="col">購入</th><th scope="col">商品・種類</th><th scope="col">対象</th><th scope="col">税込価格</th><th scope="col">ほしい</th><th scope="col">販売ページ</th></tr></thead>
+</table><p class="empty" id="empty">条件に合う商品はありません。</p></div><button type="button" id="moreGroups" class="more-groups" hidden>さらに表示</button>
+<div class="confirm-home" id="confirmHome" hidden><div class="confirm" id="buyConfirm" hidden><span id="confirmText"></span><span class="confirm-actions"><button type="button" class="confirm-yes" id="confirmYes">購入済みにする</button><button type="button" class="confirm-no" id="confirmNo">やめる</button></span></div></div>
+<section class="transfer" aria-labelledby="transferTitle"><h2 id="transferTitle">記録を別の端末へ移す</h2><p>購入済み・ほしい・期間限定マーク・選んだライバーは、このブラウザにだけ保存されている。ファイルか引き継ぎコードで持ち出し、別の端末で読み込める。ファイルはバックアップにもなる。</p><div class="transfer-grid"><div class="transfer-box"><h3>書き出す</h3><div class="transfer-actions"><button type="button" id="exportFile" data-interactive disabled>ファイルに保存</button><button type="button" id="exportCode" data-interactive disabled>コードをコピー</button></div><textarea id="codeOut" rows="3" readonly aria-label="引き継ぎコード" hidden></textarea></div><div class="transfer-box"><h3>読み込む</h3><fieldset class="transfer-mode"><legend>読み込み方</legend><label><input type="radio" name="importMode" value="merge" checked>今の記録に足す</label><label><input type="radio" name="importMode" value="replace">今の記録を置き換える</label></fieldset><div class="transfer-actions"><label class="file-button"><input type="file" id="importFile" accept=".json,application/json" data-interactive disabled>ファイルを選ぶ</label></div><textarea id="codeIn" rows="3" placeholder="引き継ぎコードを貼り付ける" aria-label="引き継ぎコードを貼り付ける" data-interactive disabled></textarea><div class="transfer-actions"><button type="button" id="importCode" data-interactive disabled>コードを読み込む</button></div></div></div><p id="transferStatus" class="transfer-status" role="status"></p></section>
+<section class="note"><h2>表の見方</h2><p>各サブ行が1つの購入候補。通常版、EX、EX -Another-、コンプリートセットなどを別々にチェックできる。「ライバーを選ぶ」で表示するライバーを選び、上の絞り込みでさらに1人に絞れる。セットと単品には収録内容が重なる場合があり、チェックは実際に購入した商品に付ける。</p><p>購入チェックは2段階。チェックを押すと確認バーが出て、「購入済みにする」を押すまで記録は変わらない。「ほしい」は購入候補の印で、上の集計の「ほしい（未購入）」がいま買うと増える支出になる。</p><p>このファイルは koe-matome で作った個人用の一覧で、データは作った人の端末の中にだけある。購入記録はこのブラウザに保存され、どこにも送信されない。</p></section>
+</main><footer class="footer">作成: <a href="https://github.com/iknoway-home/koe-matome" target="_blank" rel="noopener">koe-matome</a>（非公式）。販売状況は変わるため、購入前に公式ページを確認してください。</footer>
+<script id="koeData" type="application/json">{{DATA}}</script>
+<script>
+{{JS}}
+</script>
+</body></html>

@@ -1,0 +1,5 @@
+# 取得したデータと作ったHTMLは各自の手元だけで使う。コミットしない。
+koe-data/
+__pycache__/
+*.tmp
+.DS_Store
