@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# CI（.github/workflows/test.yml）と同じ検査をコミット前に流す。
+# 有効化: git config core.hooksPath .githooks（setup-new-pc の clone 時は自動）
+set -u
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+failed=0
+run() {
+  if ! out=$(bash -c "$1" 2>&1); then
+    echo "$ $1"
+    echo "$out" | tail -30
+    failed=1
+  fi
+}
+
+run 'python3 -m unittest discover -s tests'
+
+if [ "$failed" -ne 0 ]; then
+  echo "pre-commit: CI と同じ検査で失敗した。直して add してからコミットし直す。" >&2
+  exit 1
+fi

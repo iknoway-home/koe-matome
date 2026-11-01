@@ -20,6 +20,8 @@ python3 -m koe_matome --data /tmp/koe update --member 栞葉るり   # 実際の
 
 ページ（`koe_matome/template/`）を変えたら、生成したHTMLをPC幅とスマホ幅（390px前後）で開いて確認する。
 
+`.githooks/pre-commit` がCIと同じ検査をコミット前に流す。既存のクローンでは `git config core.hooksPath .githooks` を1回実行して有効にする（`setup-new-pc` で新しくクローンした場合は自動）。失敗したら `--no-verify` で飛ばさず、直してからコミットする。
+
 ## サイトを足すとき
 
 `sites/nijisanji.py` と同じ関数をそろえたモジュールを作り、`sites/__init__.py` に登録する。
